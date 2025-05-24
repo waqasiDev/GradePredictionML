@@ -1,0 +1,128 @@
+import re
+import os
+from dotenv import load_dotenv
+import pandas as pd
+import openai
+
+# Load environment variables if needed
+load_env = True  # Set to True if you want to load environment variables from a .env file
+
+if load_env:
+    load_dotenv()
+
+# Set up the OpenAI API key
+openai.api_key = os.environ.get('OPENAI_API_KEY')
+
+if not openai.api_key:
+    raise ValueError("OpenAI API key not found. Please set the OPENAI_API_KEY environment variable.")
+
+# Function to classify difficulty level based on ChatGPT evaluation
+def classify_difficulty_from_chatgpt(question):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",  # Use the latest recommended model
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": f"How difficult is this question for an introductory programming student? Classify the difficulty as 'easy', 'medium', or 'hard'.\n\nQuestion: {question}"}
+            ],
+            max_tokens=100,
+            temperature=0.5  # Use temperature=0.5 for balanced responses
+        )
+        
+        # Extract the response text
+        response_text = response['choices'][0]['message']['content'].strip().lower()
+        
+        # Return the difficulty classification (easy, medium, hard)
+        if 'easy' in response_text:
+            return 'easy'
+        elif 'medium' in response_text:
+            return 'medium'
+        elif 'hard' in response_text:
+            return 'hard'
+        else:
+            return 'medium'  # Default if unclear
+    except Exception as e:
+        print(f"Error with OpenAI API: {e}")
+        return 'medium'  # Default in case of error
+
+# Function to calculate points based on answer similarity and difficulty
+def grade_answer_with_openai(student_answer, correct_answer, difficulty):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",  # Use the latest recommended model
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": f"Grade the following student answer based on its closeness to the correct answer.\n\nStudent Answer: {student_answer}\nCorrect Answer: {correct_answer}\n\nAssign a grade from 0 to 1, where 1 means the answer is exactly correct, and 0 means completely wrong. Provide the grade in numeric format only."}
+            ],
+            max_tokens=50,
+            temperature=0  # Use temperature=0 for deterministic outputs
+        )
+
+        # Extract the text from the response
+        response_text = response['choices'][0]['message']['content'].strip()
+
+        # Use regex to find the numeric grade in the response text
+        grade_match = re.search(r'\d+(\.\d+)?', response_text)  # Matches numbers like 0.5, 1, etc.
+        
+        if grade_match:
+            grade = float(grade_match.group())  # Convert the matched string to a float
+        else:
+            print(f"Error: No numeric grade found in response. Full response: {response_text}")
+            grade = 0  # Default to 0 if no valid grade is found
+
+        # Assign points based on the difficulty level
+        if difficulty == "easy":
+            full_points = 1
+        elif difficulty == "medium":
+            full_points = 2
+        elif difficulty == "hard":
+            full_points = 3
+        else:
+            full_points = 0  # Default case
+
+        # Calculate the final points: Multiply grade (similarity score) with full points based on difficulty
+        return grade * full_points
+
+    except Exception as e:
+        print(f"Error with OpenAI API: {e}")
+        return 0  # In case of an error, return 0 points
+
+# Load the updated data (adjust the file path as necessary)
+file_path = 'data/raw/merged_data.xlsx'
+updated_data = pd.read_excel(file_path)
+
+# Clean column names to avoid issues with spaces
+updated_data.columns = updated_data.columns.str.strip()
+
+# Step 2: Apply the grading function for each question
+def calculate_student_points(row):
+    correct_answer = row['Answer']
+    student_answer = row['Answer Choices']
+    difficulty = classify_difficulty_from_chatgpt(row['Question'])  # Determine difficulty via ChatGPT
+    
+    # Assign points using OpenAI's grading function considering the difficulty
+    points = grade_answer_with_openai(student_answer, correct_answer, difficulty)
+    
+    # Return points and difficulty in a tuple
+    return pd.Series([points, difficulty])
+
+# Step 3: Apply the function to calculate points for each student and add the difficulty column
+updated_data[['Assigned Points', 'Difficulty']] = updated_data.apply(calculate_student_points, axis=1)
+
+# Step 4: Aggregate the total points for each student
+student_points = updated_data.groupby('Student_Id')['Assigned Points'].sum().reset_index()
+
+# Step 5: Save the processed data to a folder
+output_folder = 'data/processed'
+os.makedirs(output_folder, exist_ok=True)  # Create the folder if it doesn't exist
+
+# Save the updated dataset with difficulty and points
+updated_data_file = os.path.join(output_folder, 'updated_data_with_points.csv')
+student_points_file = os.path.join(output_folder, 'student_points.csv')
+
+updated_data.to_csv(updated_data_file, index=False)  # Save the detailed dataset with difficulty
+student_points.to_csv(student_points_file, index=False)  # Save the total points per student
+
+print(f"Processed data saved in {output_folder} folder:")
+print(f"Updated data with points: {updated_data_file}")
+print(f"Total points per student: {student_points_file}")
